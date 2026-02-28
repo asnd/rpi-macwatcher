@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Run ruff
+        run: ruff check macwatcher.py --output-format=github
+
+  syntax:
+    name: Syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check Python syntax
+        run: python3 -m py_compile macwatcher.py && echo "Syntax OK"
+
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install tinyflux mac-vendor-lookup pytest
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
+
+  config-check:
+    name: Config parse check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify config.ini is valid
+        run: |
+          python3 - <<'EOF'
+          import configparser, sys
+          cfg = configparser.ConfigParser()
+          cfg.read("config.ini")
+          required = {
+              "scanner": ["interface", "scan_mode", "scan_interval",
+                          "miss_threshold", "arp_scan_args"],
+              "arpwatch": ["arpwatch_bin", "arpwatch_dat", "leave_timeout"],
+              "database": ["db_path"],
+              "logging":  ["log_level"],
+          }
+          for section, keys in required.items():
+              assert cfg.has_section(section), f"Missing section [{section}]"
+              for key in keys:
+                  assert cfg.has_option(section, key), \
+                      f"Missing key '{key}' in [{section}]"
+          mode = cfg.get("scanner", "scan_mode")
+          assert mode in ("arp-scan", "arpwatch"), \
+              f"Invalid scan_mode: {mode}"
+          print("config.ini OK — all required keys present, scan_mode valid")
+          EOF

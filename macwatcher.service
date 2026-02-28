@@ -1,0 +1,25 @@
+[Unit]
+Description=macwatcher — WiFi network device join/leave monitor
+Documentation=https://github.com/yourname/rpi-macwatcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /opt/macwatcher/macwatcher.py
+Restart=on-failure
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=macwatcher
+
+# Give the service time to start scanning before systemd considers it failed
+TimeoutStartSec=30
+
+# Prevent filling disk if something goes catastrophically wrong with the log
+# (TinyFlux CSV only — syslog is managed by rsyslog/journald separately)
+LimitFSIZE=100M
+
+[Install]
+WantedBy=multi-user.target

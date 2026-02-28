@@ -1,0 +1,11 @@
+# known-macs.conf  —  optional friendly names for MAC addresses
+#
+# Format:  <mac address>   <friendly name>
+# Lines starting with # are ignored.
+# Copy this file to /etc/macwatcher/known-macs.conf and edit as needed,
+# then set known_macs_file = /etc/macwatcher/known-macs.conf in config.ini.
+
+# Example entries:
+# aa:bb:cc:dd:ee:ff   Living Room TV
+# 11:22:33:44:55:66   Alice's iPhone
+# de:ad:be:ef:00:01   Router
