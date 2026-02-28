@@ -100,7 +100,7 @@ class VendorLookup:
         self._logger = logger
         self._mac_lookup = None
         try:
-            from mac_vendor_lookup import MacLookup, BaseMacLookup
+            from mac_vendor_lookup import MacLookup
             ml = MacLookup()
             # Use the cached vendor list; update_vendors() is called once
             # at install time by install.sh.  If no cache exists yet, the
@@ -148,6 +148,8 @@ def load_known_macs(path: str) -> dict:
 
 def insert_event(db: TinyFlux, event: str, mac: str, ip: str,
                  vendor: str, name: str) -> None:
+    # TinyFlux tags = strings, fields = numeric only.
+    # IP address is metadata → tag; count=1 satisfies the numeric field req.
     db.insert(Point(
         time=datetime.now(timezone.utc),
         tags={
@@ -155,8 +157,9 @@ def insert_event(db: TinyFlux, event: str, mac: str, ip: str,
             "mac":    mac,
             "vendor": vendor or "unknown",
             "name":   name or "",
+            "ip":     ip,
         },
-        fields={"ip": ip},
+        fields={"count": 1},
     ))
 
 

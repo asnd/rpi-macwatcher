@@ -93,7 +93,8 @@ def test_insert_event_writes_to_db():
     p = results[0]
     assert p.tags["mac"]    == "aa:bb:cc:dd:ee:ff"
     assert p.tags["vendor"] == "Apple, Inc."
-    assert p.fields["ip"]   == "192.168.1.5"
+    assert p.tags["ip"]     == "192.168.1.5"
+    assert p.fields["count"] == 1
     Path(db_path).unlink(missing_ok=True)
 
 
@@ -110,7 +111,9 @@ def test_insert_event_unknown_vendor_fallback():
 
     Tag = TagQuery()
     results = db.search(Tag.event == "LEAVE")
-    assert results[0].tags["vendor"] == "unknown"
+    r = results[0]
+    assert r.tags["vendor"] == "unknown"
+    assert r.fields["count"] == 1
     Path(db_path).unlink(missing_ok=True)
 
 
