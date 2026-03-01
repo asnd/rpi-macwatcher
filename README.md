@@ -109,6 +109,10 @@ sudo systemctl status macwatcher
 | Leave detection | After N missed scans | After N seconds of silence |
 | Requires | `arp-scan` binary | `arpwatch` binary |
 
+In passive mode, there is no explicit "device left" packet. `macwatcher`
+parses the `arpwatch` dat file each cycle, tracks each device's `last_seen`
+timestamp, and emits `LEAVE` when `now - last_seen >= leave_timeout`.
+
 ## Database
 
 Events are stored in a TinyFlux CSV at `/var/lib/macwatcher/events.csv`.
