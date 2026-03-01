@@ -70,19 +70,28 @@ def setup_logger(level_name: str) -> logging.Logger:
     logger.setLevel(level)
 
     syslog_address = "/dev/log" if Path("/dev/log").exists() else "/var/run/syslog"
-    try:
-        sh = logging.handlers.SysLogHandler(address=syslog_address)
-        sh.setFormatter(logging.Formatter(
-            "macwatcher[%(process)d]: %(levelname)s %(message)s"))
-        logger.addHandler(sh)
-    except OSError:
-        pass
+    has_syslog = any(isinstance(h, logging.handlers.SysLogHandler)
+                     for h in logger.handlers)
+    has_stdout = any(
+        isinstance(h, logging.StreamHandler) and getattr(h, "stream", None) is sys.stdout
+        for h in logger.handlers
+    )
 
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setFormatter(logging.Formatter(
-        "%(asctime)s macwatcher %(levelname)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S"))
-    logger.addHandler(ch)
+    if not has_syslog:
+        try:
+            sh = logging.handlers.SysLogHandler(address=syslog_address)
+            sh.setFormatter(logging.Formatter(
+                "macwatcher[%(process)d]: %(levelname)s %(message)s"))
+            logger.addHandler(sh)
+        except OSError:
+            pass
+
+    if not has_stdout:
+        ch = logging.StreamHandler(sys.stdout)
+        ch.setFormatter(logging.Formatter(
+            "%(asctime)s macwatcher %(levelname)s %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S"))
+        logger.addHandler(ch)
     return logger
 
 
@@ -340,6 +349,8 @@ class MacWatcher:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self.db = TinyFlux(self.db_path)
 
+        self._known_macs_cache: dict[str, str] = {}
+        self._known_macs_mtime_ns: int | None = None
         self._running = True
         self._cfg = cfg
         signal.signal(signal.SIGTERM, self._handle_signal)
@@ -356,6 +367,21 @@ class MacWatcher:
         back to *hint* (e.g. arp-scan's own vendor column)."""
         oui = self.vendor.lookup(mac)
         return oui or hint or "unknown"
+
+    def _load_known_macs_cached(self) -> dict[str, str]:
+        path = self.known_macs_f
+        if not path:
+            return {}
+
+        try:
+            mtime_ns = Path(path).stat().st_mtime_ns
+        except FileNotFoundError:
+            mtime_ns = None
+
+        if mtime_ns != self._known_macs_mtime_ns:
+            self._known_macs_cache = load_known_macs(path)
+            self._known_macs_mtime_ns = mtime_ns
+        return self._known_macs_cache
 
     def _log_join(self, mac: str, ip: str, vendor: str,
                   name: str) -> None:
@@ -482,7 +508,7 @@ class MacWatcher:
 
         try:
             while self._running:
-                known_macs = load_known_macs(self.known_macs_f)
+                known_macs = self._load_known_macs_cached()
 
                 if self.mode == "arp-scan":
                     self._cycle_arpscan(known_macs)
