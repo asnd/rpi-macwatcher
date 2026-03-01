@@ -197,3 +197,39 @@ def test_arpwatch_read_devices_parses_dat():
     assert "00:01:02:03:04:05" in devices
 
     Path(dat_path).unlink(missing_ok=True)
+
+
+def test_cycle_arpwatch_emits_leave_for_stale_device():
+    import logging
+    from macwatcher import MacWatcher
+
+    cfg = _make_config(**{
+        "scanner.scan_mode": "arpwatch",
+        "arpwatch.leave_timeout": "120",
+    })
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
+        cfg.set("database", "db_path", f.name)
+        db_path = f.name
+
+    watcher = MacWatcher(cfg, logging.getLogger("test"))
+    watcher._arpwatch = MagicMock()
+    watcher._arpwatch.is_running.return_value = True
+    watcher._arpwatch.read_devices.return_value = {}
+    watcher.active = {
+        "aa:bb:cc:dd:ee:ff": {
+            "ip": "192.168.1.10",
+            "vendor": "Example Vendor",
+            "name": "phone",
+            "last_seen": 100.0,
+        }
+    }
+    watcher._log_leave = MagicMock()
+
+    with patch("macwatcher.time.time", return_value=230.0):
+        watcher._cycle_arpwatch({})
+
+    watcher._log_leave.assert_called_once_with(
+        "aa:bb:cc:dd:ee:ff", "192.168.1.10", "Example Vendor", "phone"
+    )
+    assert "aa:bb:cc:dd:ee:ff" not in watcher.active
+    Path(db_path).unlink(missing_ok=True)
