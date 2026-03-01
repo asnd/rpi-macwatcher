@@ -1,6 +1,8 @@
 """Unit tests for macwatcher — no hardware required."""
 
 import configparser
+import logging
+import os
 import re
 import sys
 import tempfile
@@ -197,3 +199,52 @@ def test_arpwatch_read_devices_parses_dat():
     assert "00:01:02:03:04:05" in devices
 
     Path(dat_path).unlink(missing_ok=True)
+
+
+def test_setup_logger_does_not_duplicate_handlers():
+    from macwatcher import setup_logger
+
+    logger = logging.getLogger("macwatcher")
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+
+    try:
+        setup_logger("INFO")
+        handler_count = len(logger.handlers)
+        setup_logger("DEBUG")
+        assert len(logger.handlers) == handler_count
+    finally:
+        for handler in list(logger.handlers):
+            logger.removeHandler(handler)
+            handler.close()
+
+
+def test_known_macs_cache_reloads_only_when_file_changes():
+    from macwatcher import MacWatcher
+
+    with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as f:
+        f.write("aa:bb:cc:dd:ee:ff  Phone\n")
+        known_macs_path = f.name
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
+        db_path = f.name
+
+    cfg = _make_config()
+    cfg.set("scanner", "known_macs_file", known_macs_path)
+    cfg.set("database", "db_path", db_path)
+    watcher = MacWatcher(cfg, logging.getLogger("test"))
+
+    try:
+        with patch("macwatcher.load_known_macs", return_value={"a": "one"}) as load:
+            assert watcher._load_known_macs_cached() == {"a": "one"}
+            assert watcher._load_known_macs_cached() == {"a": "one"}
+            assert load.call_count == 1
+
+        mtime_ns = Path(known_macs_path).stat().st_mtime_ns
+        os.utime(known_macs_path, ns=(mtime_ns + 1, mtime_ns + 1))
+
+        with patch("macwatcher.load_known_macs", return_value={"b": "two"}) as load:
+            assert watcher._load_known_macs_cached() == {"b": "two"}
+            assert load.call_count == 1
+    finally:
+        Path(known_macs_path).unlink(missing_ok=True)
+        Path(db_path).unlink(missing_ok=True)
