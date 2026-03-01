@@ -206,6 +206,7 @@ def test_setup_logger_does_not_duplicate_handlers():
 
     logger = logging.getLogger("macwatcher")
     for handler in list(logger.handlers):
+        handler.close()
         logger.removeHandler(handler)
 
     try:

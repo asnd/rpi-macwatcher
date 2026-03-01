@@ -68,23 +68,30 @@ def setup_logger(level_name: str) -> logging.Logger:
     logger = logging.getLogger("macwatcher")
     level = getattr(logging, level_name.upper(), logging.INFO)
     logger.setLevel(level)
-    if logger.handlers:
-        return logger
 
     syslog_address = "/dev/log" if Path("/dev/log").exists() else "/var/run/syslog"
-    try:
-        sh = logging.handlers.SysLogHandler(address=syslog_address)
-        sh.setFormatter(logging.Formatter(
-            "macwatcher[%(process)d]: %(levelname)s %(message)s"))
-        logger.addHandler(sh)
-    except OSError:
-        pass
+    has_syslog = any(isinstance(h, logging.handlers.SysLogHandler)
+                     for h in logger.handlers)
+    has_stdout = any(
+        isinstance(h, logging.StreamHandler) and getattr(h, "stream", None) is sys.stdout
+        for h in logger.handlers
+    )
 
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setFormatter(logging.Formatter(
-        "%(asctime)s macwatcher %(levelname)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S"))
-    logger.addHandler(ch)
+    if not has_syslog:
+        try:
+            sh = logging.handlers.SysLogHandler(address=syslog_address)
+            sh.setFormatter(logging.Formatter(
+                "macwatcher[%(process)d]: %(levelname)s %(message)s"))
+            logger.addHandler(sh)
+        except OSError:
+            pass
+
+    if not has_stdout:
+        ch = logging.StreamHandler(sys.stdout)
+        ch.setFormatter(logging.Formatter(
+            "%(asctime)s macwatcher %(levelname)s %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S"))
+        logger.addHandler(ch)
     return logger
 
 
@@ -364,9 +371,7 @@ class MacWatcher:
     def _load_known_macs_cached(self) -> dict[str, str]:
         path = self.known_macs_f
         if not path:
-            self._known_macs_cache = {}
-            self._known_macs_mtime_ns = None
-            return self._known_macs_cache
+            return {}
 
         try:
             mtime_ns = Path(path).stat().st_mtime_ns
