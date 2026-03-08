@@ -28,6 +28,12 @@ dependencies that are hard to install on ARM Debian.
 
 ## Architecture constraints
 
+### Config loading
+`load_config()` uses `cfg.read_dict()` to prime each section individually —
+do **not** change it to `ConfigParser(defaults=DEFAULTS)`.  The `defaults=`
+kwarg puts every key into the `[DEFAULT]` section, making all keys visible in
+every section and causing silent cross-section key bleed.
+
 ### Scan modes are mutually exclusive
 The `scan_mode` config key selects **either** `arp-scan` or `arpwatch`.
 Never run both simultaneously. Mode dispatch lives in `MacWatcher.run()`.
@@ -43,7 +49,20 @@ All database writes go through `insert_event()`. Do not call
 ### Signal handling
 Shutdown is driven by `SIGTERM` / `SIGINT` setting `_running = False`.
 Never call `sys.exit()` inside the scan loop; always let the `finally`
-block in `MacWatcher.run()` clean up child processes.
+block in `MacWatcher.run()` clean up child processes and emit the final
+`"macwatcher stopped"` log line.
+
+### Sleep / shutdown responsiveness
+The main loop sleeps in **1-second increments** (`for _ in range(interval): time.sleep(1)`)
+rather than a single `time.sleep(interval)` call.  This keeps shutdown latency
+under ~1 second after a signal.  Do not replace this with a monolithic sleep.
+
+### arpwatch LEAVE detection
+`arpwatch` never removes entries from its dat file.  LEAVE events are
+therefore fired by comparing each active device's `last_seen` timestamp
+against `time.time()` — **not** by checking whether the entry is absent
+from the current dat snapshot.  Keep LEAVE logic in `_cycle_arpwatch()`
+iterating over `self.active`, not over `devices`.
 
 ## Testing
 

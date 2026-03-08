@@ -56,11 +56,34 @@ CONFIG_PATHS = [
 # ── Config & logger ──────────────────────────────────────────────────────────
 
 def load_config() -> configparser.ConfigParser:
-    cfg = configparser.ConfigParser(defaults=DEFAULTS)
+    # Do NOT pass defaults= here — that puts every key into [DEFAULT] and
+    # makes all keys visible in every section, causing silent cross-section
+    # bleed if two sections ever share a key name.  Instead, prime each
+    # section individually so defaults are properly scoped.
+    cfg = configparser.ConfigParser()
+    cfg.read_dict({
+        "scanner": {
+            "scan_mode":       DEFAULTS["scan_mode"],
+            "interface":       DEFAULTS["interface"],
+            "scan_interval":   DEFAULTS["scan_interval"],
+            "miss_threshold":  DEFAULTS["miss_threshold"],
+            "arp_scan_args":   DEFAULTS["arp_scan_args"],
+            "known_macs_file": DEFAULTS["known_macs_file"],
+        },
+        "arpwatch": {
+            "arpwatch_bin":   DEFAULTS["arpwatch_bin"],
+            "arpwatch_dat":   DEFAULTS["arpwatch_dat"],
+            "arpwatch_extra": DEFAULTS["arpwatch_extra"],
+            "leave_timeout":  DEFAULTS["leave_timeout"],
+        },
+        "database": {
+            "db_path": DEFAULTS["db_path"],
+        },
+        "logging": {
+            "log_level": DEFAULTS["log_level"],
+        },
+    })
     cfg.read(CONFIG_PATHS)
-    for section in ("scanner", "arpwatch", "database", "logging"):
-        if not cfg.has_section(section):
-            cfg.add_section(section)
     return cfg
 
 
@@ -68,6 +91,10 @@ def setup_logger(level_name: str) -> logging.Logger:
     logger = logging.getLogger("macwatcher")
     level = getattr(logging, level_name.upper(), logging.INFO)
     logger.setLevel(level)
+
+    # Avoid adding duplicate handlers when called more than once (e.g. in tests)
+    if logger.handlers:
+        return logger
 
     syslog_address = "/dev/log" if Path("/dev/log").exists() else "/var/run/syslog"
     try:
@@ -126,19 +153,29 @@ class VendorLookup:
 
 # ── Known MACs (optional friendly names) ─────────────────────────────────────
 
-def load_known_macs(path: str) -> dict:
+def load_known_macs(path: str) -> dict[str, str]:
     known: dict[str, str] = {}
     if not path:
         return known
     try:
         with open(path) as fh:
-            for raw in fh:
+            for lineno, raw in enumerate(fh, 1):
                 line = raw.strip()
                 if not line or line.startswith("#"):
                     continue
                 parts = line.split(None, 1)
                 if len(parts) == 2:
                     known[parts[0].lower()] = parts[1]
+                else:
+                    # Single token — MAC without a friendly name.  Store it
+                    # with an empty label so it is still tracked, and emit a
+                    # warning so the operator knows the entry is incomplete.
+                    logging.getLogger("macwatcher").warning(
+                        "known_macs %s line %d: no friendly name for %s"
+                        " — storing with empty label",
+                        path, lineno, parts[0],
+                    )
+                    known[parts[0].lower()] = ""
     except FileNotFoundError:
         pass
     return known
@@ -269,8 +306,12 @@ class ArpWatchMonitor:
         try:
             self._process.wait(timeout=10)
         except subprocess.TimeoutExpired:
+            self._logger.warning("arpwatch did not terminate cleanly — killing")
             self._process.kill()
-            self._process.wait(timeout=5)
+            try:
+                self._process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._logger.error("arpwatch process could not be killed")
         self._process = None
 
     def is_running(self) -> bool:
@@ -290,7 +331,7 @@ class ArpWatchMonitor:
             with open(self._dat) as fh:
                 for raw in fh:
                     line = raw.strip()
-                    if not line:
+                    if not line or line.startswith("#"):
                         continue
                     parts = line.split("\t")
                     if len(parts) < 3:
@@ -337,6 +378,8 @@ class MacWatcher:
         # {mac: {"ip", "vendor", "name", "last_seen"}}  (arpwatch mode)
         self.active: dict = {}
 
+        if not self.db_path:
+            raise ValueError("db_path must not be empty")
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self.db = TinyFlux(self.db_path)
 
@@ -347,7 +390,7 @@ class MacWatcher:
 
     # ── helpers ───────────────────────────────────────────────────────
 
-    def _handle_signal(self, signum, _frame):
+    def _handle_signal(self, signum: int, _frame: object) -> None:
         self.logger.info("received signal %d — shutting down", signum)
         self._running = False
 
@@ -447,6 +490,10 @@ class MacWatcher:
                 dev["vendor"]    = vendor
 
         # ── Detect LEAVEs (stale entries) ─────────────────────────────
+        # arpwatch never removes rows from its dat file, so we cannot
+        # rely on absence from `devices` to detect departures.  Instead,
+        # compare each device's last-seen timestamp against `now` for
+        # every active entry — whether or not it is still in the dat.
         for mac in list(self.active):
             dev = self.active[mac]
             age = now - dev["last_seen"]
@@ -489,12 +536,16 @@ class MacWatcher:
                 else:
                     self._cycle_arpwatch(known_macs)
 
-                time.sleep(self.interval)
+                # Sleep in 1-second increments so a SIGTERM/SIGINT wakes the
+                # loop promptly instead of blocking for the full interval.
+                for _ in range(self.interval):
+                    if not self._running:
+                        break
+                    time.sleep(1)
         finally:
             if self._arpwatch is not None:
                 self._arpwatch.stop()
-
-        self.logger.info("macwatcher stopped")
+            self.logger.info("macwatcher stopped")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

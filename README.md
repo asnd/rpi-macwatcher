@@ -78,6 +78,9 @@ aa:bb:cc:dd:ee:ff   Alice's iPhone
 11:22:33:44:55:66   Living Room TV
 ```
 
+Lines with only a MAC address and no name are accepted but will emit a warning to syslog/stdout
+and be stored with an empty label. Always provide a friendly name on the same line.
+
 Then set `known_macs_file = /etc/macwatcher/known-macs.conf` in `config.ini`.
 
 ## Monitoring
@@ -106,8 +109,13 @@ sudo systemctl status macwatcher
 |---|---|---|
 | Network traffic | Yes (ARP probes) | None |
 | Detects idle devices | Yes | Only if they ARP |
-| Leave detection | After N missed scans | After N seconds of silence |
+| Leave detection | After N missed scans (`miss_threshold`) | After N seconds since last ARP seen (`leave_timeout`) |
 | Requires | `arp-scan` binary | `arpwatch` binary |
+
+> **Note on arpwatch leave detection:** `arpwatch` never removes entries from its dat file, so leave
+> detection is based solely on how long ago a device was last seen sending an ARP packet — not on
+> whether the entry appears in the dat file. Set `leave_timeout` to match your network's ARP
+> announcement interval (default: 300 s).
 
 ## Database
 
