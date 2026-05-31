@@ -120,6 +120,23 @@ def test_insert_event_unknown_vendor_fallback():
     Path(db_path).unlink(missing_ok=True)
 
 
+def test_insert_event_logs_db_failure(caplog):
+    import logging
+    from macwatcher import insert_event
+
+    class BrokenDb:
+        def insert(self, _point):
+            raise OSError("disk full")
+
+    logger = logging.getLogger("test_insert_event")
+    with caplog.at_level(logging.ERROR, logger="test_insert_event"):
+        insert_event(BrokenDb(), "JOIN", "aa:bb:cc:dd:ee:ff",
+                     "192.168.1.5", "Apple, Inc.", "My iPhone", logger)
+
+    assert "failed to persist JOIN event" in caplog.text
+    assert "disk full" in caplog.text
+
+
 # ── load_known_macs ───────────────────────────────────────────────────────────
 
 def test_load_known_macs_parses_file():
@@ -150,6 +167,22 @@ def test_load_known_macs_returns_empty_for_missing_file():
 def test_load_known_macs_returns_empty_when_path_blank():
     from macwatcher import load_known_macs
     assert load_known_macs("") == {}
+
+
+def test_load_known_macs_skips_invalid_mac(caplog):
+    import logging
+    from macwatcher import load_known_macs
+
+    with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as f:
+        f.write("not-a-mac  Broken entry\n")
+        path = f.name
+
+    with caplog.at_level(logging.WARNING, logger="macwatcher"):
+        known = load_known_macs(path)
+
+    assert known == {}
+    assert "invalid MAC address" in caplog.text
+    Path(path).unlink(missing_ok=True)
 
 
 # ── Bug #5: load_known_macs must not silently drop MAC-only lines ─────────────
@@ -194,6 +227,40 @@ def test_invalid_scan_mode_raises():
         MacWatcher(cfg, logger)
 
     Path(db_path).unlink(missing_ok=True)
+
+
+def test_non_positive_scan_interval_raises():
+    import logging
+    from macwatcher import MacWatcher
+
+    logger = logging.getLogger("test")
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
+        db_path = f.name
+
+    cfg = _make_config(**{
+        "scanner.scan_interval": "0",
+        "database.db_path": db_path,
+    })
+
+    with pytest.raises(ValueError, match="scan_interval"):
+        MacWatcher(cfg, logger)
+
+    Path(db_path).unlink(missing_ok=True)
+
+
+# ── run_arp_scan argument handling ─────────────────────────────────────────────
+
+def test_run_arp_scan_rejects_invalid_extra_args():
+    import logging
+    from macwatcher import run_arp_scan
+
+    logger = logging.getLogger("test")
+
+    with patch("subprocess.run") as mock_run:
+        result = run_arp_scan("eth0", "--localnet 'unterminated", logger)
+
+    assert result is None
+    mock_run.assert_not_called()
 
 
 # ── ArpWatchMonitor dat-file reader ──────────────────────────────────────────
@@ -410,4 +477,27 @@ def test_stopped_log_emitted_on_clean_exit():
     assert any("stopped" in m for m in logged_messages), (
         "'macwatcher stopped' was never logged (Bug #3)"
     )
+    Path(db_path).unlink(missing_ok=True)
+
+
+def test_run_closes_database_on_exit():
+    import logging
+    import tempfile
+    from macwatcher import MacWatcher
+
+    logger = logging.getLogger("test_db_close")
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
+        db_path = f.name
+
+    cfg = _make_config(**{
+        "scanner.scan_interval": "1",
+        "database.db_path": db_path,
+    })
+    watcher = MacWatcher(cfg, logger)
+    watcher.db = MagicMock()
+    watcher._running = False
+
+    watcher.run()
+
+    watcher.db.close.assert_called_once()
     Path(db_path).unlink(missing_ok=True)
