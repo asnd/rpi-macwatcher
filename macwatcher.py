@@ -16,6 +16,7 @@ import logging
 import logging.handlers
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -46,6 +47,7 @@ DEFAULTS = {
 }
 
 VALID_SCAN_MODES = {"arp-scan", "arpwatch"}
+_MAC_ADDRESS = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 
 CONFIG_PATHS = [
     "/etc/macwatcher/config.ini",
@@ -164,8 +166,15 @@ def load_known_macs(path: str) -> dict[str, str]:
                 if not line or line.startswith("#"):
                     continue
                 parts = line.split(None, 1)
+                mac = parts[0].lower()
+                if not _MAC_ADDRESS.match(mac):
+                    logging.getLogger("macwatcher").warning(
+                        "known_macs %s line %d: invalid MAC address %s — skipping",
+                        path, lineno, parts[0],
+                    )
+                    continue
                 if len(parts) == 2:
-                    known[parts[0].lower()] = parts[1]
+                    known[mac] = parts[1]
                 else:
                     # Single token — MAC without a friendly name.  Store it
                     # with an empty label so it is still tracked, and emit a
@@ -175,29 +184,38 @@ def load_known_macs(path: str) -> dict[str, str]:
                         " — storing with empty label",
                         path, lineno, parts[0],
                     )
-                    known[parts[0].lower()] = ""
+                    known[mac] = ""
     except FileNotFoundError:
         pass
+    except OSError as exc:
+        logging.getLogger("macwatcher").warning(
+            "could not read known_macs file %s: %s", path, exc
+        )
     return known
 
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
 def insert_event(db: TinyFlux, event: str, mac: str, ip: str,
-                 vendor: str, name: str) -> None:
+                 vendor: str, name: str,
+                 logger: logging.Logger | None = None) -> None:
     # TinyFlux tags = strings, fields = numeric only.
     # IP address is metadata → tag; count=1 satisfies the numeric field req.
-    db.insert(Point(
-        time=datetime.now(timezone.utc),
-        tags={
-            "event":  event,
-            "mac":    mac,
-            "vendor": vendor or "unknown",
-            "name":   name or "",
-            "ip":     ip,
-        },
-        fields={"count": 1},
-    ))
+    try:
+        db.insert(Point(
+            time=datetime.now(timezone.utc),
+            tags={
+                "event":  event,
+                "mac":    mac,
+                "vendor": vendor or "unknown",
+                "name":   name or "",
+                "ip":     ip,
+            },
+            fields={"count": 1},
+        ))
+    except Exception as exc:
+        log = logger or logging.getLogger("macwatcher")
+        log.error("failed to persist %s event for mac=%s: %s", event, mac, exc)
 
 
 # ── Active mode: arp-scan ────────────────────────────────────────────────────
@@ -211,7 +229,12 @@ _ARP_LINE = re.compile(
 def run_arp_scan(interface: str, extra_args: str,
                  logger: logging.Logger) -> dict | None:
     """Return ``{mac_lower: (ip, arp_scan_vendor)}`` or *None* on failure."""
-    cmd = ["arp-scan", f"--interface={interface}"] + extra_args.split()
+    try:
+        args = shlex.split(extra_args)
+    except ValueError as exc:
+        logger.error("invalid arp_scan_args %r: %s", extra_args, exc)
+        return None
+    cmd = ["arp-scan", f"--interface={interface}"] + args
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     except FileNotFoundError:
@@ -353,22 +376,33 @@ class ArpWatchMonitor:
 class MacWatcher:
     def __init__(self, cfg: configparser.ConfigParser,
                  logger: logging.Logger):
-        self.mode          = cfg.get("scanner", "scan_mode").strip().lower()
-        self.interface     = cfg.get("scanner", "interface")
-        self.interval      = cfg.getint("scanner", "scan_interval")
-        self.miss_thresh   = cfg.getint("scanner", "miss_threshold")
-        self.arp_args      = cfg.get("scanner", "arp_scan_args")
-        self.known_macs_f  = cfg.get("scanner", "known_macs_file")
-        self.db_path       = cfg.get("database", "db_path")
+        try:
+            self.mode          = cfg.get("scanner", "scan_mode").strip().lower()
+            self.interface     = cfg.get("scanner", "interface").strip()
+            self.interval      = cfg.getint("scanner", "scan_interval")
+            self.miss_thresh   = cfg.getint("scanner", "miss_threshold")
+            self.arp_args      = cfg.get("scanner", "arp_scan_args")
+            self.known_macs_f  = cfg.get("scanner", "known_macs_file")
+            self.db_path       = cfg.get("database", "db_path").strip()
+            self.leave_timeout = cfg.getint("arpwatch", "leave_timeout")
+        except (configparser.Error, ValueError) as exc:
+            raise ValueError(f"invalid configuration: {exc}") from exc
         self.logger        = logger
 
         if self.mode not in VALID_SCAN_MODES:
             raise ValueError(
                 f"scan_mode must be one of {VALID_SCAN_MODES}, got '{self.mode}'"
             )
+        if not self.interface:
+            raise ValueError("interface must not be empty")
+        if self.interval < 1:
+            raise ValueError("scan_interval must be at least 1")
+        if self.miss_thresh < 1:
+            raise ValueError("miss_threshold must be at least 1")
+        if self.leave_timeout < 1:
+            raise ValueError("leave_timeout must be at least 1")
 
         # arpwatch-specific
-        self.leave_timeout = cfg.getint("arpwatch", "leave_timeout")
         self._arpwatch: ArpWatchMonitor | None = None
 
         # vendor resolver
@@ -407,7 +441,7 @@ class MacWatcher:
             "JOIN  mac=%s ip=%-15s vendor=%s %s",
             mac, ip, vendor, label,
         )
-        insert_event(self.db, "JOIN", mac, ip, vendor, name)
+        insert_event(self.db, "JOIN", mac, ip, vendor, name, self.logger)
 
     def _log_leave(self, mac: str, ip: str, vendor: str,
                    name: str) -> None:
@@ -416,7 +450,7 @@ class MacWatcher:
             "LEAVE mac=%s last_ip=%-15s vendor=%s %s",
             mac, ip, vendor, label,
         )
-        insert_event(self.db, "LEAVE", mac, ip, vendor, name)
+        insert_event(self.db, "LEAVE", mac, ip, vendor, name, self.logger)
 
     # ── arp-scan mode ─────────────────────────────────────────────────
 
@@ -465,7 +499,11 @@ class MacWatcher:
                 "arpwatch process died — attempting restart")
             try:
                 self._arpwatch.start()
-            except Exception:
+            except (FileNotFoundError, PermissionError) as exc:
+                self.logger.error("arpwatch restart failed: %s", exc)
+                return
+            except Exception as exc:
+                self.logger.exception("unexpected arpwatch restart failure: %s", exc)
                 return
 
         devices = self._arpwatch.read_devices()
@@ -545,6 +583,10 @@ class MacWatcher:
         finally:
             if self._arpwatch is not None:
                 self._arpwatch.stop()
+            try:
+                self.db.close()
+            except Exception as exc:
+                self.logger.warning("failed to close database cleanly: %s", exc)
             self.logger.info("macwatcher stopped")
 
 
